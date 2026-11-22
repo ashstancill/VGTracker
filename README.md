@@ -14,6 +14,7 @@ It runs as a single Docker container. Your data stays on your server, in a singl
 - **Ratings** out of 10 in half steps, plus notes and start and finish dates.
 - **Search and add**: search for any game with cover art. Uses [RAWG](https://rawg.io/apidocs) (free key) for every platform, or the Steam store if you don't add a key.
 - **Metascores and HowLongToBeat**: Metascores, genres and release dates come from RAWG and Steam. Main story, main + extras and completionist times come from HowLongToBeat. Both are fetched in the background, and there's a progress bar against the main story time for games you're playing.
+- **Box art**: Steam games use Steam's own art. Add a free [SteamGridDB](https://www.steamgriddb.com/profile/preferences/api) key for proper portrait box art on every other game (Switch, PlayStation, Xbox, Battle.net). You can also pick a different cover for any game, paste an image URL or upload your own.
 - **Manual time logging** for platforms that can't sync (Switch, Battle.net, retro).
 - **Merge duplicates**, for example when you own the same game on Steam and PlayStation (most are matched automatically).
 - **Year round-up**: hours played, games played and completed, your game of the year, hours by month, platform split, top genres, most played, top rated, your biggest gaming day and where you disagreed with the critics. Past years are always available, and the current year's round-up is highlighted on the home page every December.
@@ -90,6 +91,10 @@ This covers Xbox consoles and PC games played through the Xbox app. OpenXBL's fr
 
 A free key from [rawg.io/apidocs](https://rawg.io/apidocs) lets you search games on every platform and fills in Metascores and genres. Without it, search uses the Steam store.
 
+### SteamGridDB (optional)
+
+A free key from [steamgriddb.com](https://www.steamgriddb.com/profile/preferences/api) gives portrait box art for non-Steam games, which RAWG and PlayStation don't have. Covers you've picked yourself are never replaced.
+
 ### HowLongToBeat
 
 HowLongToBeat has no official API. Times are fetched with the [howlongtobeatpy](https://github.com/ScrappyCocco/HowLongToBeat-PythonAPI) package, which follows changes to their site. If lookups stop working, pull the latest image. You can also enter times by hand.
@@ -147,7 +152,7 @@ Keep the data folder on local storage rather than a network share, because SQLit
 
 ## Privacy
 
-Everything is stored only in your `/data` folder. There's no account, no analytics and no tracking. VGTracker connects to Steam, PlayStation Network, OpenXBL, RAWG and HowLongToBeat only to fetch your games and game details. Cover images are loaded from Steam, RAWG and PlayStation servers.
+Everything is stored only in your `/data` folder. There's no account, no analytics and no tracking. VGTracker connects to Steam, PlayStation Network, OpenXBL, RAWG, SteamGridDB and HowLongToBeat only to fetch your games and game details. Cover images are loaded from Steam, RAWG and PlayStation servers.
 
 ## Running without Docker
 

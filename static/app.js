@@ -340,7 +340,7 @@ async function openGame(id) {
     <div class="gm-hero" style="background-image:url('${esc(g.banner || g.cover)}')"></div>
     <button class="btn sm gm-close" onclick="$('#modal').close()">✕</button>
     <div class="gm">
-      <div class="side">${coverImg(g)}
+      <div class="side">${coverImg(g)}<button class="btn sm" id="gm-cover-pick" style="width:100%;justify-content:center;margin-top:.6rem">Change cover</button>
         <div class="small" style="margin-top:.8rem">${g.sources.map(s => `<div>${srcLabel(s.source)} (${esc(s.platform)}): ${hrs(s.minutes)}${s.last_played ? `, last ${fmtDate(s.last_played)}` : ''}</div>`).join('')}</div>
         ${g.steam_appid ? `<a class="small" href="https://store.steampowered.com/app/${g.steam_appid}" target="_blank" rel="noopener">Steam store ↗</a><br>` : ''}
         ${g.hltb_id ? `<a class="small" href="https://howlongtobeat.com/game/${esc(g.hltb_id)}" target="_blank" rel="noopener">HowLongToBeat ↗</a>` : ''}
@@ -405,6 +405,7 @@ async function openGame(id) {
     e.target.disabled = true; e.target.innerHTML = '<span class="spin">⟳</span> Fetching…';
     await guarded(async () => { await api('POST', `/api/games/${id}/refresh`); await refresh(); openGame(id); render(); toast('Details refreshed'); });
   };
+  $('#gm-cover-pick').onclick = () => openCoverPicker(id);
   $('#gm-merge-go').onclick = () => {
     const into = +$('#gm-merge').value; if (!into) return toast('Choose the game to merge into');
     if (!confirm(`Merge “${g.title}” into “${game(into).title}”? Playtime and accounts are combined and this entry is removed.`)) return;
@@ -416,6 +417,38 @@ async function openGame(id) {
     guarded(async () => { await api('DELETE', `/api/games/${id}`); m.close(); await load(); toast(g.sources.length ? 'Hidden' : 'Deleted'); });
   };
   if ($('#gm-unsort')) $('#gm-unsort').onclick = () => put({ status: '' });
+}
+
+async function openCoverPicker(id, q = '') {
+  const g = game(id);
+  $('#modal-body').innerHTML = `<div class="card" style="margin:0;border:0">
+    <div class="row"><h2 style="flex:1">Choose a cover for ${esc(g.title)}</h2><button class="btn sm" id="cp-back">← Back</button></div>
+    <div class="row" style="margin-top:.8rem"><input id="cp-q" value="${esc(q || g.title)}" placeholder="Search for art" style="flex:1"><button class="btn sm" id="cp-search">Search</button></div>
+    <div id="cp-grid" style="margin-top:1rem"><p class="muted"><span class="spin">⟳</span> Finding covers…</p></div>
+    <details><summary>Use your own image</summary>
+      <div class="row" style="margin-top:.6rem"><input id="cp-url" placeholder="Image URL (https://…)" style="flex:1"><button class="btn sm" id="cp-url-go">Use URL</button></div>
+      <div class="row" style="margin-top:.6rem"><input type="file" id="cp-file" accept="image/*" style="flex:1"><button class="btn sm" id="cp-file-go">Upload</button></div>
+    </details></div>`;
+  const pick = async cover => guarded(async () => { await api('PUT', `/api/games/${id}`, { cover }); await refresh(); render(); openGame(id); toast('Cover updated'); });
+  $('#cp-back').onclick = () => openGame(id);
+  $('#cp-search').onclick = () => openCoverPicker(id, $('#cp-q').value.trim());
+  $('#cp-q').onkeydown = e => { if (e.key === 'Enter') $('#cp-search').click(); };
+  $('#cp-url-go').onclick = () => { const u = $('#cp-url').value.trim(); if (!/^https?:\/\//.test(u)) return toast('Paste a full image URL'); pick(u); };
+  $('#cp-file-go').onclick = () => guarded(async () => {
+    const f = $('#cp-file').files[0]; if (!f) return toast('Choose an image first');
+    const fd = new FormData(); fd.append('file', f);
+    await api('POST', `/api/games/${id}/cover`, fd); await refresh(); render(); openGame(id); toast('Cover updated');
+  });
+  try {
+    const r = await api('GET', `/api/games/${id}/covers?q=${encodeURIComponent(q || g.title)}`);
+    const el = $('#cp-grid'); if (!el) return;
+    el.innerHTML = (r.options.length ? `<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">${r.options.map((o, i) => `<div class="tile" data-cp="${i}">
+        <div class="cover"><img src="${esc(o.thumb)}" alt="" loading="lazy" onerror="this.closest('.tile').remove()"></div><div class="s"><span>${esc(o.source)}</span></div></div>`).join('')}</div>`
+      : '<div class="empty">No covers found. Try a different search, or use your own image below.</div>')
+      + (r.has_sgdb ? '' : '<p class="small" style="margin-top:.8rem">Add a free SteamGridDB key in Settings for proper box art for every game, including Switch and other consoles.</p>')
+      + (r.errors.length ? `<p class="small err">${esc(r.errors.join(' · '))}</p>` : '');
+    $$('[data-cp]', el).forEach(t => t.onclick = () => pick(r.options[+t.dataset.cp].url));
+  } catch (e) { const el = $('#cp-grid'); if (el) el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
 /* ------------------------------------------------------------------ year round-up */
@@ -514,6 +547,12 @@ function xboxForm() {
     <div class="note">Xbox has no public API for players, so this goes through OpenXBL, a third-party service. Covers Xbox consoles and PC games played through the Xbox app. OpenXBL's free plan limits requests, so playtime for a big Xbox history fills in over the first few syncs.</div>
     <div class="row"><button class="btn sm primary" id="xbox-go">${s.has_xbox ? 'Update' : 'Connect Xbox'}</button>${s.has_xbox ? '<button class="btn sm danger" id="xbox-rm">Disconnect</button>' : ''}<span id="xbox-msg"></span></div></div>`;
 }
+function sgdbForm() {
+  return `<div id="sgdb-form" style="margin-top:1.4rem">${S.settings.has_sgdb ? '<p class="ok">✓ SteamGridDB key saved</p>' : ''}
+    <label>SteamGridDB API key (optional, free)</label><input id="sgdb-key" placeholder="${S.settings.has_sgdb ? '•••••••• (saved)' : 'Paste your key'}" autocomplete="off">
+    <div class="small">Proper portrait box art for every game, including Switch, Battle.net and other non-Steam games. Get a key at <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" rel="noopener">steamgriddb.com/profile/preferences/api</a>.</div>
+    <div class="row" style="margin-top:.8rem"><button class="btn sm primary" id="sgdb-go">Save key</button>${S.settings.has_sgdb ? '<button class="btn sm danger" id="sgdb-rm">Remove</button>' : ''}<span id="sgdb-msg"></span></div></div>`;
+}
 function rawgForm() {
   return `<div id="rawg-form">${S.settings.has_rawg_key ? '<p class="ok">✓ RAWG key saved</p>' : ''}
     <label>RAWG API key (optional, free)</label><input id="rawg-key" placeholder="${S.settings.has_rawg_key ? '•••••••• (saved)' : 'Paste your key'}" autocomplete="off">
@@ -554,6 +593,10 @@ function bindAccountForms(after) {
     await done('#xbox-msg', `<span class="ok">Found ${r.games} games</span>`);
   });
   if ($('#xbox-rm')) $('#xbox-rm').onclick = e => busy(e.target, $('#xbox-msg'), async () => { await api('POST', '/api/accounts/xbox', { remove: true }); await done(); });
+  if ($('#sgdb-go')) $('#sgdb-go').onclick = e => busy(e.target, $('#sgdb-msg'), async () => {
+    await api('POST', '/api/accounts/sgdb', { key: $('#sgdb-key').value }); await done('#sgdb-msg', '<span class="ok">Saved. Covers update in the background.</span>');
+  });
+  if ($('#sgdb-rm')) $('#sgdb-rm').onclick = e => busy(e.target, $('#sgdb-msg'), async () => { await api('POST', '/api/accounts/sgdb', { key: '' }); await done(); });
   if ($('#rawg-go')) $('#rawg-go').onclick = e => busy(e.target, $('#rawg-msg'), async () => {
     await api('POST', '/api/accounts/rawg', { key: $('#rawg-key').value }); await done('#rawg-msg', '<span class="ok">Saved</span>');
   });
@@ -584,7 +627,7 @@ function renderSettings() {
       <div class="row"><label style="margin:0">Sync every</label><select id="set-sync" style="width:auto">${[['1', 'hour'], ['3', '3 hours'], ['6', '6 hours'], ['12', '12 hours'], ['24', 'day'], ['0', 'never (manual only)']]
         .map(([v, l]) => `<option value="${v}" ${s.sync_hours === v ? 'selected' : ''}>${l}</option>`).join('')}</select><button class="btn sm" id="set-sync-now">Sync now</button></div>
       <p class="small">Steam, PlayStation and Xbox only report total playtime, so VGTracker records the difference at every sync. That's how hours get split by day and year. More frequent syncs give more accurate dates.</p></div>
-    <div class="card"><h2>Game details</h2>${rawgForm()}
+    <div class="card"><h2>Game details</h2>${rawgForm()}${sgdbForm()}
       <label class="check" style="margin-top:1.2rem"><input type="checkbox" id="set-hltb" ${s.hltb_enabled === '1' ? 'checked' : ''}> <span>Fetch HowLongToBeat times${s.hltb_available ? '' : ' <span class="err">(howlongtobeatpy isn\'t installed)</span>'}</span></label>
       <div class="row" style="margin-top:.8rem"><button class="btn sm" id="set-refetch">Re-fetch details for every game</button>${S.enrich_pending ? `<span class="small">${S.enrich_pending} games waiting for details</span>` : ''}</div></div>
     <div class="card"><h2>Import from Yamtrack</h2>${yamForm()}</div>
@@ -636,7 +679,7 @@ const WIZ = [
   { title: 'Connect Steam', body: () => `<p class="muted">VGTracker reads your Steam library and playtime. Steam Deck playtime counts too.</p>${steamForm()}` },
   { title: 'Connect PlayStation', body: () => `<p class="muted">Reads the PS4 and PS5 games you've played and how long for.</p>${psnForm()}` },
   { title: 'Connect Xbox', body: () => `<p class="muted">Reads the Xbox and Xbox app (PC) games you've played and how long for.</p>${xboxForm()}` },
-  { title: 'Game details', body: () => `${rawgForm()}<label class="check" style="margin-top:1.4rem"><input type="checkbox" id="wiz-hltb" ${S.settings.hltb_enabled === '1' ? 'checked' : ''}><span>Fetch HowLongToBeat times<br><span class="small">Looked up in the background for each game.</span></span></label>`,
+  { title: 'Game details', body: () => `${rawgForm()}${sgdbForm()}<label class="check" style="margin-top:1.4rem"><input type="checkbox" id="wiz-hltb" ${S.settings.hltb_enabled === '1' ? 'checked' : ''}><span>Fetch HowLongToBeat times<br><span class="small">Looked up in the background for each game.</span></span></label>`,
     next: async () => api('POST', '/api/settings', { hltb_enabled: $('#wiz-hltb').checked ? '1' : '0' }) },
   { title: `What you've played in ${YEAR}`, body: () => `<p class="muted">From now on, every sync records how much you played and when, so hours are split by year exactly.</p>
       <p class="muted">For the time before today, Steam only gives a lifetime total and the date you last played. PlayStation also gives the date you first played.</p>
@@ -647,7 +690,7 @@ const WIZ = [
   { title: 'Coming from Yamtrack?', body: () => `<p class="muted">Bring your games, ratings, statuses and notes across. Skip this if you're starting fresh.</p>${yamForm()}` },
   { title: 'Password (optional)', body: () => passwordForm() },
   { title: "You're all set", body: () => `<p class="muted">${hasAccounts() ? 'Hit finish to run the first sync. Covers, Metascores and HLTB times then fill in over the next few minutes in the background.' : 'No accounts connected, so add games by searching, or connect Steam or PlayStation later in Settings.'}</p>
-      <ul class="list">${[['Steam', S.settings.has_steam_key], ['PlayStation', S.settings.has_psn], ['Xbox', S.settings.has_xbox], ['RAWG search & Metascores', S.settings.has_rawg_key], ['HowLongToBeat', S.settings.hltb_enabled === '1'], ['Password', S.password_enabled]]
+      <ul class="list">${[['Steam', S.settings.has_steam_key], ['PlayStation', S.settings.has_psn], ['Xbox', S.settings.has_xbox], ['RAWG search & Metascores', S.settings.has_rawg_key], ['SteamGridDB box art', S.settings.has_sgdb], ['HowLongToBeat', S.settings.hltb_enabled === '1'], ['Password', S.password_enabled]]
         .map(([l, on]) => `<li><div class="grow">${l}</div>${on ? '<span class="ok">✓ On</span>' : '<span class="muted">Off</span>'}</li>`).join('')}</ul><div id="wiz-sync"></div>`,
     next: async () => {
       if (hasAccounts()) {

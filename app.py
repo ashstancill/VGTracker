@@ -28,6 +28,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "vgtracker.db")
+COVER_DIR = os.path.join(DATA_DIR, "covers")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -57,7 +58,7 @@ WIDGET_TOKEN = hashlib.sha256((app.secret_key + "widget").encode()).hexdigest()[
 
 STATUSES = ["playing", "completed", "planning", "paused", "dropped", "ignored", ""]
 # Settings that hold credentials: never sent to the browser.
-SECRET_KEYS = {"password_hash", "steam_key", "psn_npsso", "psn_refresh", "psn_refresh_exp", "rawg_key", "xbox_key"}
+SECRET_KEYS = {"password_hash", "steam_key", "psn_npsso", "psn_refresh", "psn_refresh_exp", "rawg_key", "xbox_key", "sgdb_key"}
 
 # ---------------------------------------------------------------- database
 
@@ -151,6 +152,12 @@ def close_db(_exc):
 def init_db():
     db = connect()
     db.executescript(SCHEMA)
+    # Columns added after the first release
+    cols = {r[1] for r in db.execute("PRAGMA table_info(games)")}
+    for col in ("cover_custom", "cover_checked"):
+        if col not in cols:
+            db.execute(f"ALTER TABLE games ADD COLUMN {col} INTEGER DEFAULT 0")
+    os.makedirs(COVER_DIR, exist_ok=True)
     for k, v in DEFAULT_SETTINGS.items():
         db.execute("INSERT OR IGNORE INTO settings VALUES (?, ?)", (k, v))
     db.commit()
@@ -517,6 +524,36 @@ def rawg_search(key, q, n=12):
     return out
 
 
+# ---------------------------------------------------------------- SteamGridDB (box art)
+# Portrait box art for any game, including console games. Free API key from
+# https://www.steamgriddb.com/profile/preferences/api
+
+SGDB = "https://www.steamgriddb.com/api/v2"
+
+
+def sgdb(key, path):
+    return http(SGDB + path, headers={"Authorization": f"Bearer {key}"}).get("data") or []
+
+
+def sgdb_find(key, title):
+    """Best matching SteamGridDB game id for a title."""
+    res = sgdb(key, "/search/autocomplete/" + urllib.parse.quote(title, safe=""))
+    n = norm_title(title)
+    exact = [g for g in res if norm_title(g.get("name")) == n]
+    return (exact or res or [{}])[0].get("id")
+
+
+def sgdb_grids(key, game_id=None, steam_appid=None, n=12):
+    path = f"/grids/steam/{steam_appid}" if steam_appid else f"/grids/game/{game_id}"
+    try:
+        grids = sgdb(key, path + "?dimensions=600x900&types=static&nsfw=false&humor=false")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return []
+        raise
+    return [{"url": x["url"], "thumb": x.get("thumb") or x["url"], "source": "SteamGridDB"} for x in grids[:n] if x.get("url")]
+
+
 # ---------------------------------------------------------------- HowLongToBeat
 
 def hltb_lookup(title):
@@ -583,6 +620,20 @@ def enrich_game(db, gid, force=False):
             upd["meta_checked"] = 1
         except Exception as e:
             log.warning("metadata lookup failed for %s: %s", gm["title"], e)
+    # Box art: Steam games already have Steam's own portrait art; everything else gets SteamGridDB's
+    if not gm["cover_checked"] and not gm["cover_custom"]:
+        key = setting(db, "sgdb_key")
+        if key and not gm["steam_appid"]:
+            try:
+                sid = sgdb_find(key, gm["title"])
+                grids = sgdb_grids(key, game_id=sid) if sid else []
+                if grids:
+                    upd["cover"] = grids[0]["url"]
+                upd["cover_checked"] = 1
+            except Exception as e:
+                log.warning("SteamGridDB lookup failed for %s: %s", gm["title"], e)
+        else:
+            upd["cover_checked"] = 1
     if setting(db, "hltb_enabled", "1") == "1" and (force or not gm["hltb_checked"]):
         try:
             h = hltb_lookup(gm["title"])
@@ -757,7 +808,7 @@ def enricher_loop():
             db = connect()
             # Games you're tracking come first, then the rest of the synced library
             todo = [r[0] for r in db.execute(
-                """SELECT id FROM games WHERE status != 'ignored' AND (meta_checked=0 OR hltb_checked=0)
+                """SELECT id FROM games WHERE status != 'ignored' AND (meta_checked=0 OR hltb_checked=0 OR cover_checked=0)
                    ORDER BY status='' , id DESC LIMIT 400""")]
             for gid in todo:
                 enrich_game(db, gid)
@@ -888,7 +939,7 @@ def game_rows(db):
         gm["year_minutes"] = years.get(gm["id"], {})
         gm["last_played"] = max([s["last_played"] or "" for s in ss] + [last_log.get(gm["id"], "")])
         gm["first_played"] = min([s["first_played"] for s in ss if s["first_played"]], default="")
-        for k in ("norm", "meta_checked", "hltb_checked"):
+        for k in ("norm", "meta_checked", "hltb_checked", "cover_checked"):
             gm.pop(k, None)
     return games
 
@@ -902,12 +953,13 @@ def state():
     settings["psn_expires"] = setting(db, "psn_refresh_exp")
     settings["has_rawg_key"] = bool(setting(db, "rawg_key"))
     settings["has_xbox"] = bool(setting(db, "xbox_key"))
+    settings["has_sgdb"] = bool(setting(db, "sgdb_key"))
     try:
         import howlongtobeatpy  # noqa: F401
         settings["hltb_available"] = True
     except ImportError:
         settings["hltb_available"] = False
-    pending = db.execute("SELECT COUNT(*) FROM games WHERE status!='ignored' AND (meta_checked=0 OR hltb_checked=0)"
+    pending = db.execute("SELECT COUNT(*) FROM games WHERE status!='ignored' AND (meta_checked=0 OR hltb_checked=0 OR cover_checked=0)"
                          ).fetchone()[0]
     return jsonify(
         settings=settings,
@@ -1008,6 +1060,9 @@ def update_game(gid):
     if "title" in d and d["title"] != old["title"]:
         d["meta_checked"] = 0
         d["hltb_checked"] = 0
+        d["cover_checked"] = 0
+    if "cover" in d and d["cover"] != old["cover"]:
+        d["cover_custom"] = 1  # chosen by you, so automatic lookups leave it alone
     d["updated"] = now_iso()
     db.execute(f"UPDATE games SET {', '.join(k + '=?' for k in d)} WHERE id=?", (*d.values(), gid))
     db.commit()
@@ -1033,6 +1088,60 @@ def refresh_game(gid):
     db = get_db()
     enrich_game(db, gid, force=True)
     return jsonify(ok=True)
+
+
+@app.get("/api/games/<int:gid>/covers")
+def cover_options(gid):
+    """Box art to choose from: SteamGridDB, Steam and RAWG."""
+    db = get_db()
+    gm = db.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone() or abort(404)
+    q = (request.args.get("q") or gm["title"]).strip()
+    out, errors = [], []
+    key = setting(db, "sgdb_key")
+    if key:
+        try:
+            if gm["steam_appid"] and q == gm["title"]:
+                out += sgdb_grids(key, steam_appid=gm["steam_appid"])
+            sid = sgdb_find(key, q)
+            if sid:
+                out += sgdb_grids(key, game_id=sid)
+        except Exception as e:
+            errors.append(f"SteamGridDB: {e}")
+    if gm["steam_appid"]:
+        out.append({"url": steam_cover(gm["steam_appid"]), "thumb": steam_cover(gm["steam_appid"]), "source": "Steam"})
+    rkey = setting(db, "rawg_key")
+    try:
+        res = rawg_search(rkey, q, 6) if rkey else steam_store_search(q)[:6]
+        out += [{"url": r["cover"], "thumb": r["cover"], "source": ("RAWG: " if rkey else "Steam: ") + r["title"]}
+                for r in res if r.get("cover")]
+    except Exception as e:
+        errors.append(str(e))
+    seen, uniq = set(), []
+    for o in out:
+        if o["url"] not in seen:
+            seen.add(o["url"])
+            uniq.append(o)
+    return jsonify(options=uniq, errors=errors, has_sgdb=bool(key))
+
+
+@app.post("/api/games/<int:gid>/cover")
+def upload_cover(gid):
+    db = get_db()
+    db.execute("SELECT 1 FROM games WHERE id=?", (gid,)).fetchone() or abort(404)
+    f = request.files.get("file")
+    ext = os.path.splitext(f.filename or "")[1].lower() if f else ""
+    if not f or ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"):
+        abort(400, "choose a JPG, PNG, WebP or GIF image")
+    name = f"{gid}-{secrets.token_hex(4)}{ext}"
+    f.save(os.path.join(COVER_DIR, name))
+    db.execute("UPDATE games SET cover=?, cover_custom=1, updated=? WHERE id=?", (f"/covers/{name}", now_iso(), gid))
+    db.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/covers/<path:name>")
+def covers(name):
+    return send_from_directory(COVER_DIR, name, max_age=86400 * 30)
 
 
 @app.post("/api/games/<int:gid>/merge")
@@ -1205,6 +1314,24 @@ def connect_xbox():
     set_setting(db, "xbox_key", key)
     db.commit()
     return jsonify(ok=True, games=len(titles))
+
+
+@app.post("/api/accounts/sgdb")
+def connect_sgdb():
+    db = get_db()
+    key = ((request.get_json(force=True) or {}).get("key") or "").strip()
+    if key:
+        try:
+            sgdb_find(key, "Portal 2")
+        except urllib.error.HTTPError as e:
+            abort(400, "SteamGridDB rejected that key" if e.code in (401, 403) else f"SteamGridDB error {e.code}")
+        except Exception as e:
+            abort(400, str(e))
+        db.execute("UPDATE games SET cover_checked=0 WHERE cover_custom=0")  # look up box art for everything
+    set_setting(db, "sgdb_key", key)
+    db.commit()
+    wake_enricher()
+    return jsonify(ok=True)
 
 
 @app.post("/api/accounts/rawg")
