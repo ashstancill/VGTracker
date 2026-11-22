@@ -4,6 +4,8 @@ A lightweight, self-hosted video game tracker. It syncs what you play on **Steam
 
 It runs as a single Docker container. Your data stays on your server, in a single SQLite file.
 
+![Home page with this year's stats, now playing and recent activity](docs/dashboard.png)
+
 ## Features
 
 - **Automatic sync**: connects to Steam (Web API) and PlayStation Network (PS4 and PS5) and syncs every few hours. Steam Deck playtime is included in Steam. Games you start playing move to **Playing** automatically.
@@ -22,6 +24,14 @@ It runs as a single Docker container. Your data stays on your server, in a singl
 - **Backup and restore** as a single JSON file.
 
 Built with Python (Flask), SQLite and plain JavaScript. There's no build step.
+
+| Year round-up | Library |
+|---|---|
+| ![Year round-up](docs/round-up.png) | ![Library](docs/library.png) |
+| **Game details** | **Search and add** |
+| ![Game details with rating, Metascore and HowLongToBeat times](docs/game.png) | ![Search and add](docs/search.png) |
+
+*Screenshots use made-up demo games and cover art.*
 
 ## Quick start (Docker Compose)
 

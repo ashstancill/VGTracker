@@ -146,7 +146,7 @@ function renderDashboard() {
   const days = {};
   for (const p of S.recent) (days[p.day] ||= []).push(p);
   const activity = Object.entries(days).slice(0, 8).map(([d, ps]) => `<li><div class="grow"><b>${fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' })}</b>
-    <small>${ps.map(p => `${esc(p.title)} (${hrs(p.minutes)})`).join(' · ')}</small></div><span class="muted">${hrs(ps.reduce((a, p) => a + p.minutes, 0))}</span></li>`).join('');
+    <small>${Object.entries(ps.reduce((o, p) => ((o[p.title] = (o[p.title] || 0) + p.minutes), o), {})).map(([t, mn]) => `${esc(t)} (${hrs(mn)})`).join(' · ')}</small></div><span class="muted">${hrs(ps.reduce((a, p) => a + p.minutes, 0))}</span></li>`).join('');
 
   return `<div class="container">
     ${banner}
