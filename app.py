@@ -41,8 +41,12 @@ app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
 def _secret_key():
     path = os.path.join(DATA_DIR, "secret.key")
     if not os.path.exists(path):
-        with open(path, "w") as f:
-            f.write(secrets.token_hex(32))
+        try:
+            with open(path, "w") as f:
+                f.write(secrets.token_hex(32))
+        except PermissionError:
+            raise SystemExit(f"Can't write to {DATA_DIR}. The data folder must be owned by the user the container "
+                             f"runs as (uid {os.getuid()}): run  chown -R {os.getuid()}:{os.getgid()} <your data folder>")
     with open(path) as f:
         return f.read().strip()
 
@@ -53,7 +57,7 @@ WIDGET_TOKEN = hashlib.sha256((app.secret_key + "widget").encode()).hexdigest()[
 
 STATUSES = ["playing", "completed", "planning", "paused", "dropped", "ignored", ""]
 # Settings that hold credentials: never sent to the browser.
-SECRET_KEYS = {"password_hash", "steam_key", "psn_npsso", "psn_refresh", "psn_refresh_exp", "rawg_key"}
+SECRET_KEYS = {"password_hash", "steam_key", "psn_npsso", "psn_refresh", "psn_refresh_exp", "rawg_key", "xbox_key"}
 
 # ---------------------------------------------------------------- database
 
@@ -102,6 +106,7 @@ CREATE TABLE IF NOT EXISTS play_log (
   minutes INTEGER NOT NULL,
   source TEXT DEFAULT 'manual');
 CREATE INDEX IF NOT EXISTS play_log_day ON play_log(day);
+CREATE TABLE IF NOT EXISTS aw_rules (app TEXT PRIMARY KEY, game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS sources_game ON sources(game_id);
 """
 
@@ -399,6 +404,174 @@ def psn_played_games(access):
     return list(merged.values())
 
 
+# ---------------------------------------------------------------- Xbox (via OpenXBL, https://xbl.io)
+# Xbox has no public API for players, so this uses OpenXBL: a free service you sign in to with your
+# Microsoft account, which gives you an API key. Title history lists what you've played and when;
+# playtime ("MinutesPlayed") comes from a separate stats call per game.
+
+XBL = "https://xbl.io/api/v2"
+XBOX_STATS_PER_SYNC = 40  # OpenXBL's free tier allows a limited number of requests an hour
+
+
+def xbl(key, path):
+    return http(XBL + path, headers={"X-Authorization": key, "Accept-Language": "en-GB"})
+
+
+def xbox_title_history(key):
+    out = []
+    for t in xbl(key, "/player/titleHistory").get("titles", []):
+        if (t.get("type") or "Game") != "Game":
+            continue
+        devices = t.get("devices") or []
+        lp = ((t.get("titleHistory") or {}).get("lastTimePlayed") or "")[:19]
+        out.append({
+            "source": "xbox",
+            "ext_id": str(t.get("titleId")),
+            "name": t.get("name") or str(t.get("titleId")),
+            "platform": "Xbox" if any("xbox" in d.lower() for d in devices) or not devices else "PC (Xbox app)",
+            "minutes": 0,
+            "first_played": "",
+            "last_played": lp,
+            "image": t.get("displayImage") or "",
+        })
+    return out
+
+
+def _find_stat(obj, name):
+    """Find a stat value by name anywhere in the (deeply nested) stats response."""
+    if isinstance(obj, dict):
+        if str(obj.get("name", "")).lower() == name.lower() and "value" in obj:
+            return obj["value"]
+        obj = list(obj.values())
+    if isinstance(obj, list):
+        for v in obj:
+            r = _find_stat(v, name)
+            if r is not None:
+                return r
+    return None
+
+
+def xbox_minutes(key, title_id):
+    v = _find_stat(xbl(key, f"/achievements/stats/{title_id}"), "MinutesPlayed")
+    try:
+        return int(float(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def xbox_items(db, key):
+    """Title history plus playtime. Playtime is only fetched for games played since the last sync (and a
+    batch of not-yet-seen games each sync), to stay inside OpenXBL's rate limit. Games whose playtime
+    hasn't been fetched yet are left out until it has, so their old hours aren't logged as new play."""
+    titles = xbox_title_history(key)
+    known = {r["ext_id"]: dict(r) for r in rows(db, "SELECT * FROM sources WHERE source='xbox'")}
+    changed = [t for t in titles if t["ext_id"] in known and t["last_played"] > (known[t["ext_id"]]["last_played"] or "")]
+    unseen = sorted([t for t in titles if t["ext_id"] not in known], key=lambda t: t["last_played"], reverse=True)
+    budget = XBOX_STATS_PER_SYNC
+    out = []
+    for t in titles:
+        k = known.get(t["ext_id"])
+        if k and t not in changed:
+            t["minutes"] = k["minutes"]
+            out.append(t)
+    for t in changed + unseen:
+        if budget <= 0:
+            if t["ext_id"] in known:  # keep last known playtime, try again next sync
+                t["minutes"] = known[t["ext_id"]]["minutes"]
+                t["last_played"] = known[t["ext_id"]]["last_played"]
+                out.append(t)
+            continue
+        budget -= 1
+        try:
+            t["minutes"] = xbox_minutes(key, t["ext_id"])
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                budget = 0
+                if t["ext_id"] in known:
+                    t["minutes"], t["last_played"] = known[t["ext_id"]]["minutes"], known[t["ext_id"]]["last_played"]
+                    out.append(t)
+                continue
+            t["minutes"] = 0
+        out.append(t)
+    pending = sum(1 for t in titles if t["ext_id"] not in known) - sum(1 for t in out if t["ext_id"] not in known)
+    return out, max(0, pending)
+
+
+# ---------------------------------------------------------------- ActivityWatch (Battle.net, EA, Epic, emulators...)
+# Launchers like Battle.net have no API for playtime, but ActivityWatch records which app is in the
+# foreground. You map an app (e.g. Overwatch.exe) to a game, and its time per day is added to the game.
+
+def aw_get(base, path):
+    return http(base.rstrip("/") + path, timeout=60)
+
+
+def aw_window_buckets(base):
+    return [b for b in aw_get(base, "/api/0/buckets/") if b.startswith("aw-watcher-window")]
+
+
+def aw_app_time(base, days):
+    """Seconds in the foreground per app, per day: {day: {app_lower: (app, seconds)}}."""
+    out = {}
+    buckets = aw_window_buckets(base)
+    for i in range(0, len(days), 31):
+        chunk = days[i:i + 31]
+        periods = []
+        for d in chunk:
+            start = dt.datetime.combine(d, dt.time()).astimezone()
+            periods.append(f"{start.isoformat()}/{(start + dt.timedelta(days=1)).isoformat()}")
+        for b in buckets:
+            res = http(base.rstrip("/") + "/api/0/query/", data={"timeperiods": periods, "query": [
+                f'events = flood(query_bucket("{b}"));',
+                'events = merge_events_by_keys(events, ["app"]);',
+                "RETURN = events;"]}, method="POST", timeout=120)
+            for d, evs in zip(chunk, res):
+                day = out.setdefault(d.isoformat(), {})
+                for e in evs or []:
+                    app_name = (e.get("data") or {}).get("app") or ""
+                    if not app_name:
+                        continue
+                    prev = day.get(app_name.lower(), (app_name, 0))
+                    day[app_name.lower()] = (app_name, prev[1] + (e.get("duration") or 0))
+    return out
+
+
+def aw_sync(db):
+    base = setting(db, "aw_url")
+    rules = {r["app"]: r["game_id"] for r in rows(db, "SELECT * FROM aw_rules")}
+    if not base or not rules:
+        return None
+    start = setting(db, "aw_synced_until")
+    first = dt.date(dt.date.today().year, 1, 1)
+    # Re-read the last couple of days each time, since today's total keeps growing
+    since = max(first, dt.date.fromisoformat(start) - dt.timedelta(days=2)) if start else first
+    days = [since + dt.timedelta(days=i) for i in range((dt.date.today() - since).days + 1)]
+    data = aw_app_time(base, days)
+    minutes = 0
+    for app_l, gid in rules.items():
+        src = "aw:" + app_l
+        db.execute("DELETE FROM play_log WHERE source=? AND day>=?", (src, since.isoformat()))
+        for day, apps in data.items():
+            sec = apps.get(app_l, (None, 0))[1]
+            if sec >= 60:
+                db.execute("INSERT INTO play_log (game_id, day, minutes, source) VALUES (?,?,?,?)",
+                           (gid, day, int(sec // 60), src))
+                minutes += int(sec // 60)
+        tot = db.execute("SELECT COALESCE(SUM(minutes),0), MAX(day), MIN(day) FROM play_log WHERE source=?", (src,)).fetchone()
+        ex = db.execute("SELECT id FROM sources WHERE source=? AND ext_id=?", (src, app_l)).fetchone()
+        if ex:
+            db.execute("UPDATE sources SET game_id=?, minutes=?, last_played=?, first_played=? WHERE id=?",
+                       (gid, tot[0], tot[1] or "", tot[2] or "", ex[0]))
+        else:
+            db.execute("""INSERT INTO sources (game_id, source, ext_id, name, platform, minutes, first_played, last_played)
+                          VALUES (?,?,?,?,?,?,?,?)""", (gid, src, app_l, app_l, "PC", tot[0], tot[2] or "", tot[1] or ""))
+            add_platform(db, gid, "PC")
+        if tot[1] and tot[1] >= (dt.date.today() - dt.timedelta(days=14)).isoformat():
+            mark_playing(db, gid, tot[2])
+    set_setting(db, "aw_synced_until", today())
+    db.commit()
+    return {"apps": len(rules), "minutes": minutes}
+
+
 # ---------------------------------------------------------------- RAWG (search, Metascores, genres)
 
 def rawg_search(key, q, n=12):
@@ -593,12 +766,16 @@ def run_sync():
         return {"ok": False, "message": "A sync is already running"}
     try:
         db = connect()
-        first_run = not setting(db, "last_sync")
         result, msgs = {"ok": True}, []
+
+        def first(src):  # first sync of this account: its lifetime totals can't be dated
+            new = not setting(db, f"synced_{src}") and not (src in ("steam", "psn") and setting(db, "last_sync"))
+            set_setting(db, f"synced_{src}", "1")
+            return new
         key, sid = setting(db, "steam_key"), setting(db, "steam_id")
         if key and sid:
             try:
-                s = apply_items(db, steam_owned_games(key, sid), first_run)
+                s = apply_items(db, steam_owned_games(key, sid), first("steam"))
                 result["steam"] = s
                 msgs.append(f"Steam: {s['games']} games, {s['updated']} with new playtime")
             except Exception as e:
@@ -607,12 +784,30 @@ def run_sync():
         if setting(db, "psn_npsso") or setting(db, "psn_refresh"):
             try:
                 tok = psn_access_token(db)
-                s = apply_items(db, psn_played_games(tok), first_run)
+                s = apply_items(db, psn_played_games(tok), first("psn"))
                 result["psn"] = s
                 msgs.append(f"PlayStation: {s['games']} games, {s['updated']} with new playtime")
             except Exception as e:
                 result["ok"] = False
                 msgs.append(f"PlayStation failed: {e}")
+        if setting(db, "xbox_key"):
+            try:
+                items, pending = xbox_items(db, setting(db, "xbox_key"))
+                s = apply_items(db, items, first("xbox"))
+                result["xbox"] = s
+                msgs.append(f"Xbox: {s['games']} games, {s['updated']} with new playtime"
+                            + (f" ({pending} still to fetch)" if pending else ""))
+            except Exception as e:
+                result["ok"] = False
+                msgs.append(f"Xbox failed: {e}")
+        if setting(db, "aw_url"):
+            try:
+                s = aw_sync(db)
+                if s:
+                    msgs.append(f"ActivityWatch: {s['apps']} apps tracked")
+            except Exception as e:
+                result["ok"] = False
+                msgs.append(f"ActivityWatch failed: {e}")
         if not msgs:
             msgs.append("No accounts connected")
         if not setting(db, "tracking_since"):
@@ -790,6 +985,7 @@ def state():
     settings["has_psn"] = bool(setting(db, "psn_npsso") or setting(db, "psn_refresh"))
     settings["psn_expires"] = setting(db, "psn_refresh_exp")
     settings["has_rawg_key"] = bool(setting(db, "rawg_key"))
+    settings["has_xbox"] = bool(setting(db, "xbox_key"))
     try:
         import howlongtobeatpy  # noqa: F401
         settings["hltb_available"] = True
@@ -806,6 +1002,7 @@ def state():
         password_from_env=bool(APP_PASSWORD),
         widget_url=f"/api/widget?token={WIDGET_TOKEN}",
         enrich_pending=pending,
+        aw_rules=rows(db, "SELECT r.app, r.game_id, g.title FROM aw_rules r JOIN games g ON g.id=r.game_id ORDER BY r.app"),
         today=today(),
     )
 
@@ -934,6 +1131,7 @@ def merge_game(gid):
     b = db.execute("SELECT * FROM games WHERE id=?", (into,)).fetchone() or abort(404)
     db.execute("UPDATE sources SET game_id=? WHERE game_id=?", (into, gid))
     db.execute("UPDATE play_log SET game_id=? WHERE game_id=?", (into, gid))
+    db.execute("UPDATE aw_rules SET game_id=? WHERE game_id=?", (into, gid))
     fill = {}
     for k in ("cover", "banner", "rating", "notes", "started", "completed_date", "metascore", "hltb_main",
               "hltb_extra", "hltb_complete", "released", "genres", "rawg_id", "steam_appid"):
@@ -1071,6 +1269,104 @@ def connect_psn():
     set_setting(db, "psn_refresh_exp", time.time() + int(tok.get("refresh_token_expires_in") or 0))
     db.commit()
     return jsonify(ok=True, games=len(games))
+
+
+@app.post("/api/accounts/xbox")
+def connect_xbox():
+    db = get_db()
+    data = request.get_json(force=True) or {}
+    if data.get("remove"):
+        set_setting(db, "xbox_key", "")
+        db.commit()
+        return jsonify(ok=True)
+    key = (data.get("key") or "").strip()
+    if len(key) < 10:
+        abort(400, "Paste your OpenXBL API key")
+    try:
+        titles = xbox_title_history(key)
+    except urllib.error.HTTPError as e:
+        abort(400, "OpenXBL rejected that key" if e.code in (401, 403) else f"OpenXBL error {e.code}")
+    except Exception as e:
+        abort(400, str(e))
+    set_setting(db, "xbox_key", key)
+    db.commit()
+    return jsonify(ok=True, games=len(titles))
+
+
+@app.post("/api/aw")
+def connect_aw():
+    db = get_db()
+    url = ((request.get_json(force=True) or {}).get("url") or "").strip().rstrip("/")
+    if url:
+        if not re.match(r"https?://", url):
+            url = "http://" + url
+        try:
+            n = len(aw_window_buckets(url))
+        except Exception as e:
+            abort(400, f"Couldn't reach ActivityWatch at {url}: {e}")
+        if not n:
+            abort(400, "Connected, but ActivityWatch has no window-tracking data (aw-watcher-window)")
+    set_setting(db, "aw_url", url)
+    set_setting(db, "aw_synced_until", "")
+    db.commit()
+    return jsonify(ok=True, url=url)
+
+
+@app.get("/api/aw/apps")
+def aw_apps():
+    """The apps you've used most over the last 60 days, to pick games from."""
+    db = get_db()
+    base = setting(db, "aw_url")
+    if not base:
+        abort(400, "Connect ActivityWatch first")
+    days = [dt.date.today() - dt.timedelta(days=i) for i in range(59, -1, -1)]
+    try:
+        data = aw_app_time(base, days)
+    except Exception as e:
+        abort(502, f"ActivityWatch: {e}")
+    tot = {}
+    for apps in data.values():
+        for k, (name, sec) in apps.items():
+            n, s = tot.get(k, (name, 0))
+            tot[k] = (n, s + sec)
+    rules = {r["app"]: r for r in rows(db, "SELECT r.app, r.game_id, g.title FROM aw_rules r JOIN games g ON g.id=r.game_id")}
+    out = [{"app": n, "key": k, "minutes": int(s // 60), "game_id": rules.get(k, {}).get("game_id"),
+            "title": rules.get(k, {}).get("title", "")}
+           for k, (n, s) in sorted(tot.items(), key=lambda x: -x[1][1]) if s >= 600][:80]
+    return jsonify(apps=out)
+
+
+@app.post("/api/aw/rules")
+def aw_rule():
+    """Map an app to a game (by title, creating the game if needed), or remove the mapping."""
+    db = get_db()
+    data = request.get_json(force=True) or {}
+    app_l = (data.get("app") or "").strip().lower()
+    title = (data.get("title") or "").strip()
+    if not app_l:
+        abort(400, "app is required")
+    src = "aw:" + app_l
+    db.execute("DELETE FROM play_log WHERE source=?", (src,))
+    db.execute("DELETE FROM sources WHERE source=?", (src,))
+    db.execute("DELETE FROM aw_rules WHERE app=?", (app_l,))
+    gid = None
+    if title:
+        r = db.execute("SELECT id FROM games WHERE norm=?", (norm_title(title),)).fetchone()
+        if r:
+            gid = r[0]
+        else:
+            gid = db.execute("INSERT INTO games (title, norm, platforms, added, updated) VALUES (?,?,?,?,?)",
+                             (title, norm_title(title), "PC", now_iso(), now_iso())).lastrowid
+        db.execute("INSERT INTO aw_rules VALUES (?, ?)", (app_l, gid))
+    set_setting(db, "aw_synced_until", "")  # re-read the year so the new game gets its history
+    db.commit()
+    if gid:
+        try:
+            aw_sync(db)
+        except Exception as e:
+            log.warning("ActivityWatch sync after rule change: %s", e)
+        wake_enricher()
+    return jsonify(ok=True, game_id=gid)
 
 
 @app.post("/api/accounts/rawg")

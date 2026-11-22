@@ -8,6 +8,8 @@ const STATUS = [
   ['playing', 'Playing'], ['completed', 'Completed'], ['planning', 'Planning'], ['paused', 'Paused'], ['dropped', 'Dropped'],
 ];
 const STATUS_LABEL = { playing: 'Playing', completed: 'Completed', planning: 'Planning', paused: 'Paused', dropped: 'Dropped', ignored: 'Hidden', '': 'Library' };
+const srcLabel = s => s.startsWith('aw:') ? 'ActivityWatch' : ({ steam: 'Steam', psn: 'PlayStation', xbox: 'Xbox', manual: 'Logged by you', import: 'Imported' }[s] || s);
+const hasAccounts = () => S.settings.has_steam_key || S.settings.has_psn || S.settings.has_xbox || (S.settings.aw_url && S.aw_rules.length);
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function hrs(min, short = false) {
@@ -95,7 +97,7 @@ function render() {
   $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.view === view));
   const v = $('#view');
   if (S.settings.setup_done !== '1') { $('#nav').style.visibility = 'hidden'; $('#sync-btn').hidden = true; v.innerHTML = renderWizard(); bindWizard(); return; }
-  $('#nav').style.visibility = ''; $('#sync-btn').hidden = !(S.settings.has_steam_key || S.settings.has_psn);
+  $('#nav').style.visibility = ''; $('#sync-btn').hidden = !hasAccounts();
   const fn = { dashboard: renderDashboard, library: renderLibrary, add: renderAdd, year: renderYear, settings: renderSettings }[view] || renderDashboard;
   v.innerHTML = fn();
   bind(v);
@@ -162,7 +164,7 @@ function renderDashboard() {
 
     <div class="section"><h2>Now playing</h2><a class="small" href="#library" data-go="library" data-lib="playing">See all</a></div>
     ${playing.length ? `<div class="now">${playing.slice(0, 6).map(nowCard).join('')}</div>`
-      : `<div class="empty">Nothing marked as playing. Games you play on Steam or PlayStation show up here automatically after a sync.</div>`}
+      : `<div class="empty">Nothing marked as playing. Games you play on Steam, PlayStation or Xbox show up here automatically after a sync.</div>`}
 
     <div class="grid2" style="margin-top:1.6rem">
       <div class="card"><h2>Recent activity</h2>${activity ? `<ul class="list">${activity}</ul>` : '<p class="muted">Playtime picked up by syncs and sessions you log appears here.</p>'}</div>
@@ -339,7 +341,7 @@ async function openGame(id) {
     <button class="btn sm gm-close" onclick="$('#modal').close()">✕</button>
     <div class="gm">
       <div class="side">${coverImg(g)}
-        <div class="small" style="margin-top:.8rem">${g.sources.map(s => `<div>${s.source === 'steam' ? 'Steam' : 'PlayStation'} (${esc(s.platform)}): ${hrs(s.minutes)}${s.last_played ? `, last ${fmtDate(s.last_played)}` : ''}</div>`).join('')}</div>
+        <div class="small" style="margin-top:.8rem">${g.sources.map(s => `<div>${srcLabel(s.source)}${s.source.startsWith('aw:') ? ` (${esc(s.source.slice(3))})` : ` (${esc(s.platform)})`}: ${hrs(s.minutes)}${s.last_played ? `, last ${fmtDate(s.last_played)}` : ''}</div>`).join('')}</div>
         ${g.steam_appid ? `<a class="small" href="https://store.steampowered.com/app/${g.steam_appid}" target="_blank" rel="noopener">Steam store ↗</a><br>` : ''}
         ${g.hltb_id ? `<a class="small" href="https://howlongtobeat.com/game/${esc(g.hltb_id)}" target="_blank" rel="noopener">HowLongToBeat ↗</a>` : ''}
       </div>
@@ -363,9 +365,9 @@ async function openGame(id) {
         <label>Notes</label><textarea id="gm-notes" placeholder="Thoughts, where you got to, what's left…">${esc(g.notes)}</textarea>
 
         <details ${!g.sources.length ? 'open' : ''}><summary>Log time played (${sessions.length} entries)</summary>
-          <p class="small">For consoles that can't sync (Switch, Xbox…) or play that didn't get picked up.</p>
+          <p class="small">For consoles that can't sync (Switch, retro…) or play that didn't get picked up.</p>
           <div class="row"><input type="number" id="gm-h" step="0.25" min="0" placeholder="Hours" style="width:110px"><input type="date" id="gm-d" value="${S.today}" style="width:170px"><button class="btn sm" id="gm-log">Add time</button></div>
-          ${sessions.length ? `<ul class="list" style="margin-top:.6rem">${sessions.slice(0, 40).map(s => `<li><div class="grow">${fmtDate(s.day)}<small>${{ steam: 'Steam sync', psn: 'PlayStation sync', manual: 'Logged by you', import: 'Imported' }[s.source] || s.source}</small></div><b>${hrs(s.minutes)}</b>
+          ${sessions.length ? `<ul class="list" style="margin-top:.6rem">${sessions.slice(0, 40).map(s => `<li><div class="grow">${fmtDate(s.day)}<small>${['manual', 'import'].includes(s.source) ? srcLabel(s.source) : srcLabel(s.source) + ' sync'}</small></div><b>${hrs(s.minutes)}</b>
             ${['manual', 'import'].includes(s.source) ? `<button class="btn sm ghost" data-del-s="${s.id}" title="Remove">✕</button>` : ''}</li>`).join('')}</ul>` : ''}
         </details>
         <details><summary>Edit details</summary>
@@ -503,6 +505,31 @@ function psnForm() {
     <div class="note">This uses the same unofficial API as the PlayStation app, so treat the token like a password. VGTracker only reads your game list and playtime, a few times a day. The sign-in lasts about two months, after which you paste a fresh token. PS4 and PS5 games only.</div>
     <div class="row"><button class="btn sm primary" id="psn-go">${s.has_psn ? 'Update' : 'Connect PlayStation'}</button>${s.has_psn ? '<button class="btn sm danger" id="psn-rm">Disconnect</button>' : ''}<span id="psn-msg"></span></div></div>`;
 }
+function xboxForm() {
+  const s = S.settings;
+  return `<div id="xbox-form">${s.has_xbox ? '<p class="ok">✓ Connected</p>' : ''}
+    <ol><li>Go to <a href="https://xbl.io" target="_blank" rel="noopener">xbl.io</a> (OpenXBL) and sign in with your Microsoft account. It's free.</li>
+      <li>On your OpenXBL profile page, create an API key and paste it below.</li></ol>
+    <label>OpenXBL API key</label><input id="xbox-key" placeholder="${s.has_xbox ? '•••••••• (saved)' : 'Paste your key'}" autocomplete="off">
+    <div class="note">Xbox has no public API for players, so this goes through OpenXBL, a third-party service. Covers Xbox consoles and PC games played through the Xbox app. OpenXBL's free plan limits requests, so playtime for a big Xbox history fills in over the first few syncs.</div>
+    <div class="row"><button class="btn sm primary" id="xbox-go">${s.has_xbox ? 'Update' : 'Connect Xbox'}</button>${s.has_xbox ? '<button class="btn sm danger" id="xbox-rm">Disconnect</button>' : ''}<span id="xbox-msg"></span></div></div>`;
+}
+function awForm(withApps = true) {
+  const s = S.settings;
+  return `<div id="aw-form"><p class="muted">For games with no API, like Battle.net, EA app, Epic, Ubisoft and emulators. ActivityWatch records which app is open on your PC; pick the apps that are games and their time is added automatically.</p>
+    <label>ActivityWatch address</label><div class="row"><input id="aw-url" value="${esc(s.aw_url || '')}" placeholder="http://192.168.1.20:5600" style="flex:1"><button class="btn sm primary" id="aw-go">${s.aw_url ? 'Update' : 'Connect'}</button>${s.aw_url ? '<button class="btn sm danger" id="aw-rm">Disconnect</button>' : ''}</div>
+    <div class="small">ActivityWatch only listens on the PC itself by default. To reach it from your server, set <code>host = "0.0.0.0"</code> in its server config and restart it.</div><span id="aw-msg"></span>
+    ${s.aw_url && withApps ? `<h3 style="margin:1.2rem 0 .4rem">Games</h3>
+      <div id="aw-mapped">${awMapped()}</div>
+      <button class="btn sm" id="aw-apps" style="margin-top:.6rem">Find games in my recent apps</button><div id="aw-list"></div>` : ''}</div>`;
+}
+const awMapped = () => S.aw_rules.length ? `<ul class="list">${S.aw_rules.map(r => `<li><div class="grow"><b>${esc(r.title)}</b><small>${esc(r.app)}</small></div><button class="btn sm ghost" data-aw-rm="${esc(r.app)}">Remove</button></li>`).join('')}</ul>` : '<p class="small">No apps mapped to games yet.</p>';
+function bindAwMapped() {
+  $$('[data-aw-rm]').forEach(b => b.onclick = () => busy(b, $('#aw-msg'), async () => {
+    await api('POST', '/api/aw/rules', { app: b.dataset.awRm, title: '' }); await refresh(); $('#aw-mapped').innerHTML = awMapped(); bindAwMapped();
+  }));
+}
+const KNOWN_GAME_EXE = /overwatch|diablo|wow(-64)?\.exe|hearthstone|sc2|starcraft|cod|warcraft|heroes|blizzard|battle\.net|fortnite|valorant|league of legends|eldenring|minecraft|retroarch|dolphin|yuzu|ryujinx|pcsx2|rpcs3|cemu|ea ?app|fifa|fc2\d|apex|bf\d|battlefield/i;
 function rawgForm() {
   return `<div id="rawg-form">${S.settings.has_rawg_key ? '<p class="ok">✓ RAWG key saved</p>' : ''}
     <label>RAWG API key (optional, free)</label><input id="rawg-key" placeholder="${S.settings.has_rawg_key ? '•••••••• (saved)' : 'Paste your key'}" autocomplete="off">
@@ -538,6 +565,32 @@ function bindAccountForms(after) {
     await done('#psn-msg', `<span class="ok">Found ${r.games} played games</span>`);
   });
   if ($('#psn-rm')) $('#psn-rm').onclick = e => busy(e.target, $('#psn-msg'), async () => { await api('POST', '/api/accounts/psn', { remove: true }); await done(); });
+  if ($('#xbox-go')) $('#xbox-go').onclick = e => busy(e.target, $('#xbox-msg'), async () => {
+    const r = await api('POST', '/api/accounts/xbox', { key: $('#xbox-key').value });
+    await done('#xbox-msg', `<span class="ok">Found ${r.games} games</span>`);
+  });
+  if ($('#xbox-rm')) $('#xbox-rm').onclick = e => busy(e.target, $('#xbox-msg'), async () => { await api('POST', '/api/accounts/xbox', { remove: true }); await done(); });
+  if ($('#aw-go')) $('#aw-go').onclick = e => busy(e.target, $('#aw-msg'), async () => {
+    await api('POST', '/api/aw', { url: $('#aw-url').value }); await done('#aw-msg', '<span class="ok">Connected</span>');
+  });
+  if ($('#aw-rm')) $('#aw-rm').onclick = e => busy(e.target, $('#aw-msg'), async () => { await api('POST', '/api/aw', { url: '' }); await done(); });
+  if ($('#aw-mapped')) bindAwMapped();
+  if ($('#aw-apps')) $('#aw-apps').onclick = e => busy(e.target, $('#aw-list'), async () => {
+    const r = await api('GET', '/api/aw/apps');
+    const titles = S.games.filter(g => g.status !== 'ignored').map(g => g.title).sort();
+    const rows = r.apps.filter(a => !a.game_id).sort((a, b) => (KNOWN_GAME_EXE.test(b.app) - KNOWN_GAME_EXE.test(a.app)) || b.minutes - a.minutes);
+    $('#aw-list').innerHTML = `<p class="small" style="margin-top:.8rem">Apps used in the last 60 days. Likely games are listed first. Type the game's name and press Track. Don't add games you play through Steam, or their time is counted twice.</p>
+      <datalist id="aw-titles">${titles.map(t => `<option value="${esc(t)}">`).join('')}</datalist>
+      <ul class="list">${rows.map((a, i) => `<li><div class="grow"><b>${esc(a.app)}</b><small>${hrs(a.minutes)} in 60 days${KNOWN_GAME_EXE.test(a.app) ? ' · looks like a game' : ''}</small></div>
+        <input list="aw-titles" id="aw-t-${i}" placeholder="Game name" style="max-width:220px"><button class="btn sm" data-aw-add="${i}">Track</button></li>`).join('') || '<li class="muted">Nothing new found.</li>'}</ul>`;
+    $$('[data-aw-add]').forEach(b => b.onclick = () => busy(b, $('#aw-msg'), async () => {
+      const a = rows[+b.dataset.awAdd], title = $('#aw-t-' + b.dataset.awAdd).value.trim();
+      if (!title) throw new Error('Type the game name first');
+      await api('POST', '/api/aw/rules', { app: a.app, title });
+      b.closest('li').remove(); await refresh(); toast(`Tracking ${a.app} as ${title}`);
+      $('#aw-mapped').innerHTML = awMapped(); bindAwMapped();
+    }));
+  });
   if ($('#rawg-go')) $('#rawg-go').onclick = e => busy(e.target, $('#rawg-msg'), async () => {
     await api('POST', '/api/accounts/rawg', { key: $('#rawg-key').value }); await done('#rawg-msg', '<span class="ok">Saved</span>');
   });
@@ -562,11 +615,13 @@ function renderSettings() {
   return `<div class="container narrow"><div class="page-head"><h1>Settings</h1></div>
     <div class="card"><h2>Steam</h2>${steamForm()}</div>
     <div class="card"><h2>PlayStation</h2>${psnForm()}</div>
+    <div class="card"><h2>Xbox</h2>${xboxForm()}</div>
+    <div class="card"><h2>Battle.net and other PC games</h2>${awForm()}</div>
     <div class="card"><h2>Syncing</h2>
       <p class="muted">${s.last_sync ? `Last sync ${ago(s.last_sync)} (${fmtDate(s.last_sync, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}): ${esc(s.last_sync_result)}` : 'Not synced yet.'}</p>
       <div class="row"><label style="margin:0">Sync every</label><select id="set-sync" style="width:auto">${[['1', 'hour'], ['3', '3 hours'], ['6', '6 hours'], ['12', '12 hours'], ['24', 'day'], ['0', 'never (manual only)']]
         .map(([v, l]) => `<option value="${v}" ${s.sync_hours === v ? 'selected' : ''}>${l}</option>`).join('')}</select><button class="btn sm" id="set-sync-now">Sync now</button></div>
-      <p class="small">Steam and PlayStation only report total playtime, so VGTracker records the difference at every sync. That's how hours get split by day and year. More frequent syncs give more accurate dates.</p></div>
+      <p class="small">Steam, PlayStation and Xbox only report total playtime, so VGTracker records the difference at every sync. That's how hours get split by day and year. More frequent syncs give more accurate dates.</p></div>
     <div class="card"><h2>Game details</h2>${rawgForm()}
       <label class="check" style="margin-top:1.2rem"><input type="checkbox" id="set-hltb" ${s.hltb_enabled === '1' ? 'checked' : ''}> <span>Fetch HowLongToBeat times${s.hltb_available ? '' : ' <span class="err">(howlongtobeatpy isn\'t installed)</span>'}</span></label>
       <div class="row" style="margin-top:.8rem"><button class="btn sm" id="set-refetch">Re-fetch details for every game</button>${S.enrich_pending ? `<span class="small">${S.enrich_pending} games waiting for details</span>` : ''}</div></div>
@@ -618,6 +673,8 @@ const WIZ = [
     next: async () => api('POST', '/api/settings', { display_name: $('#wiz-name').value }) },
   { title: 'Connect Steam', body: () => `<p class="muted">VGTracker reads your Steam library and playtime. Steam Deck playtime counts too.</p>${steamForm()}` },
   { title: 'Connect PlayStation', body: () => `<p class="muted">Reads the PS4 and PS5 games you've played and how long for.</p>${psnForm()}` },
+  { title: 'Connect Xbox', body: () => `<p class="muted">Reads the Xbox and Xbox app (PC) games you've played and how long for.</p>${xboxForm()}` },
+  { title: 'Battle.net and other PC games', body: () => `${awForm()}<p class="small">Using ActivityWatch is optional. You can always log time by hand instead.</p>` },
   { title: 'Game details', body: () => `${rawgForm()}<label class="check" style="margin-top:1.4rem"><input type="checkbox" id="wiz-hltb" ${S.settings.hltb_enabled === '1' ? 'checked' : ''}><span>Fetch HowLongToBeat times<br><span class="small">Looked up in the background for each game.</span></span></label>`,
     next: async () => api('POST', '/api/settings', { hltb_enabled: $('#wiz-hltb').checked ? '1' : '0' }) },
   { title: `What you've played in ${YEAR}`, body: () => `<p class="muted">From now on, every sync records how much you played and when, so hours are split by year exactly.</p>
@@ -628,11 +685,11 @@ const WIZ = [
     next: async () => api('POST', '/api/settings', { attribute_year: $('#wiz-attr').checked ? '1' : '0' }) },
   { title: 'Coming from Yamtrack?', body: () => `<p class="muted">Bring your games, ratings, statuses and notes across. Skip this if you're starting fresh.</p>${yamForm()}` },
   { title: 'Password (optional)', body: () => passwordForm() },
-  { title: "You're all set", body: () => `<p class="muted">${S.settings.has_steam_key || S.settings.has_psn ? 'Hit finish to run the first sync. Covers, Metascores and HLTB times then fill in over the next few minutes in the background.' : 'No accounts connected, so add games by searching, or connect Steam or PlayStation later in Settings.'}</p>
-      <ul class="list">${[['Steam', S.settings.has_steam_key], ['PlayStation', S.settings.has_psn], ['RAWG search & Metascores', S.settings.has_rawg_key], ['HowLongToBeat', S.settings.hltb_enabled === '1'], ['Password', S.password_enabled]]
+  { title: "You're all set", body: () => `<p class="muted">${hasAccounts() ? 'Hit finish to run the first sync. Covers, Metascores and HLTB times then fill in over the next few minutes in the background.' : 'No accounts connected, so add games by searching, or connect Steam or PlayStation later in Settings.'}</p>
+      <ul class="list">${[['Steam', S.settings.has_steam_key], ['PlayStation', S.settings.has_psn], ['Xbox', S.settings.has_xbox], ['ActivityWatch', S.aw_rules.length ? `${S.aw_rules.length} games` : S.settings.aw_url], ['RAWG search & Metascores', S.settings.has_rawg_key], ['HowLongToBeat', S.settings.hltb_enabled === '1'], ['Password', S.password_enabled]]
         .map(([l, on]) => `<li><div class="grow">${l}</div>${on ? '<span class="ok">✓ On</span>' : '<span class="muted">Off</span>'}</li>`).join('')}</ul><div id="wiz-sync"></div>`,
     next: async () => {
-      if (S.settings.has_steam_key || S.settings.has_psn) {
+      if (hasAccounts()) {
         $('#wiz-sync').innerHTML = '<p class="muted"><span class="spin">⟳</span> Running the first sync…</p>';
         const r = await api('POST', '/api/sync'); toast(r.message);
       }
