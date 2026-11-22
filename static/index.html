@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VGTracker</title>
+  <link rel="icon" href="/static/icon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#dashboard"><img src="/static/icon.svg" alt="" width="28"> VGTracker</a>
+    <nav id="nav">
+      <a data-view="dashboard">Home</a>
+      <a data-view="library">Library</a>
+      <a data-view="add">Add game</a>
+      <a data-view="year">Year round-up</a>
+      <a data-view="settings">Settings</a>
+    </nav>
+    <button class="btn ghost sm" id="sync-btn" title="Sync Steam and PlayStation now">⟳ Sync</button>
+  </header>
+
+  <main id="view"></main>
+
+  <dialog id="modal"><div id="modal-body"></div></dialog>
+  <div id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+services:
+  vgtracker:
+    image: ghcr.io/ashstancill/vgtracker:latest
+    container_name: vgtracker
+    restart: unless-stopped
+    user: "1000:1000"          # must own the data folder
+    ports:
+      - "8715:8000"
+    environment:
+      - TZ=Europe/London
+    volumes:
+      - ./data:/data
