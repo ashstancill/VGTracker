@@ -1,6 +1,6 @@
 # 🎮 VGTracker
 
-A lightweight, self-hosted video game tracker. It syncs what you play on **Steam**, **PlayStation** and **Xbox** automatically, picks up PC games from other launchers through **ActivityWatch**, records your playtime year by year, and gives you a round-up at the end of every year.
+A lightweight, self-hosted video game tracker. It syncs what you play on **Steam**, **PlayStation** and **Xbox** automatically, records your playtime year by year, and gives you a round-up at the end of every year.
 
 It runs as a single Docker container. Your data stays on your server, in a single SQLite file.
 
@@ -9,13 +9,12 @@ It runs as a single Docker container. Your data stays on your server, in a singl
 ## Features
 
 - **Automatic sync**: connects to Steam (Web API), PlayStation Network (PS4 and PS5) and Xbox (consoles and the Xbox app on PC, via OpenXBL), and syncs every few hours. Steam Deck playtime is included in Steam. Games you start playing move to **Playing** automatically.
-- **Battle.net, EA, Epic, Ubisoft and emulators**: if you run [ActivityWatch](https://activitywatch.net), pick which apps are games and their time is added automatically, day by day.
 - **Hours by year**: Steam, PlayStation and Xbox only report lifetime totals, so VGTracker records the difference at every sync. Your playtime is then known per day, per month and per year, not just in total.
 - **Statuses**: Playing, Completed, Planning, Paused and Dropped. Completion dates are set when you mark a game as completed. Tools, demos and soundtracks from your Steam library can be hidden.
 - **Ratings** out of 10 in half steps, plus notes and start and finish dates.
 - **Search and add**: search for any game with cover art. Uses [RAWG](https://rawg.io/apidocs) (free key) for every platform, or the Steam store if you don't add a key.
 - **Metascores and HowLongToBeat**: Metascores, genres and release dates come from RAWG and Steam. Main story, main + extras and completionist times come from HowLongToBeat. Both are fetched in the background, and there's a progress bar against the main story time for games you're playing.
-- **Manual time logging** for platforms that can't sync (Switch, Xbox, retro).
+- **Manual time logging** for platforms that can't sync (Switch, Battle.net, retro).
 - **Merge duplicates**, for example when you own the same game on Steam and PlayStation (most are matched automatically).
 - **Year round-up**: hours played, games played and completed, your game of the year, hours by month, platform split, top genres, most played, top rated, your biggest gaming day and where you disagreed with the critics. Past years are always available, and the current year's round-up is highlighted on the home page every December.
 - **Yamtrack import**: bring games, statuses, scores, playtime, dates and notes across from a Yamtrack CSV export.
@@ -87,16 +86,6 @@ Xbox has no public API for players, so VGTracker uses [OpenXBL](https://xbl.io),
 
 This covers Xbox consoles and PC games played through the Xbox app. OpenXBL's free plan limits requests per hour, so VGTracker fetches playtime for up to 40 games per sync. With a long Xbox history, older games fill in over the first few syncs.
 
-### Battle.net and other PC games (ActivityWatch)
-
-Battle.net, the EA app, Epic and Ubisoft Connect have no playtime API. If you run [ActivityWatch](https://activitywatch.net) on your PC, VGTracker can read which app was in the foreground and for how long:
-
-1. Make ActivityWatch reachable from your server. By default it only listens on the PC itself, so set `host = "0.0.0.0"` in its server config and restart it (or run `aw-server` on your server).
-2. Enter its address in **Settings → Battle.net and other PC games**, for example `http://192.168.1.20:5600`.
-3. Click **Find games in my recent apps** and give each game's app (for example `Overwatch.exe`) a name.
-
-Time is counted per day from 1 January, so mapping an app fills in the whole year straight away. Don't map games you play through Steam, or their time is counted twice. Time with the game window in front counts as play, including when it's paused.
-
 ### RAWG (optional)
 
 A free key from [rawg.io/apidocs](https://rawg.io/apidocs) lets you search games on every platform and fills in Metascores and genres. Without it, search uses the Steam store.
@@ -158,7 +147,7 @@ Keep the data folder on local storage rather than a network share, because SQLit
 
 ## Privacy
 
-Everything is stored only in your `/data` folder. There's no account, no analytics and no tracking. VGTracker connects to Steam, PlayStation Network, OpenXBL, your ActivityWatch server, RAWG and HowLongToBeat only to fetch your games and game details. Cover images are loaded from Steam, RAWG and PlayStation servers.
+Everything is stored only in your `/data` folder. There's no account, no analytics and no tracking. VGTracker connects to Steam, PlayStation Network, OpenXBL, RAWG and HowLongToBeat only to fetch your games and game details. Cover images are loaded from Steam, RAWG and PlayStation servers.
 
 ## Running without Docker
 

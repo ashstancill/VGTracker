@@ -106,7 +106,6 @@ CREATE TABLE IF NOT EXISTS play_log (
   minutes INTEGER NOT NULL,
   source TEXT DEFAULT 'manual');
 CREATE INDEX IF NOT EXISTS play_log_day ON play_log(day);
-CREATE TABLE IF NOT EXISTS aw_rules (app TEXT PRIMARY KEY, game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS sources_game ON sources(game_id);
 """
 
@@ -497,81 +496,6 @@ def xbox_items(db, key):
     return out, max(0, pending)
 
 
-# ---------------------------------------------------------------- ActivityWatch (Battle.net, EA, Epic, emulators...)
-# Launchers like Battle.net have no API for playtime, but ActivityWatch records which app is in the
-# foreground. You map an app (e.g. Overwatch.exe) to a game, and its time per day is added to the game.
-
-def aw_get(base, path):
-    return http(base.rstrip("/") + path, timeout=60)
-
-
-def aw_window_buckets(base):
-    return [b for b in aw_get(base, "/api/0/buckets/") if b.startswith("aw-watcher-window")]
-
-
-def aw_app_time(base, days):
-    """Seconds in the foreground per app, per day: {day: {app_lower: (app, seconds)}}."""
-    out = {}
-    buckets = aw_window_buckets(base)
-    for i in range(0, len(days), 31):
-        chunk = days[i:i + 31]
-        periods = []
-        for d in chunk:
-            start = dt.datetime.combine(d, dt.time()).astimezone()
-            periods.append(f"{start.isoformat()}/{(start + dt.timedelta(days=1)).isoformat()}")
-        for b in buckets:
-            res = http(base.rstrip("/") + "/api/0/query/", data={"timeperiods": periods, "query": [
-                f'events = flood(query_bucket("{b}"));',
-                'events = merge_events_by_keys(events, ["app"]);',
-                "RETURN = events;"]}, method="POST", timeout=120)
-            for d, evs in zip(chunk, res):
-                day = out.setdefault(d.isoformat(), {})
-                for e in evs or []:
-                    app_name = (e.get("data") or {}).get("app") or ""
-                    if not app_name:
-                        continue
-                    prev = day.get(app_name.lower(), (app_name, 0))
-                    day[app_name.lower()] = (app_name, prev[1] + (e.get("duration") or 0))
-    return out
-
-
-def aw_sync(db):
-    base = setting(db, "aw_url")
-    rules = {r["app"]: r["game_id"] for r in rows(db, "SELECT * FROM aw_rules")}
-    if not base or not rules:
-        return None
-    start = setting(db, "aw_synced_until")
-    first = dt.date(dt.date.today().year, 1, 1)
-    # Re-read the last couple of days each time, since today's total keeps growing
-    since = max(first, dt.date.fromisoformat(start) - dt.timedelta(days=2)) if start else first
-    days = [since + dt.timedelta(days=i) for i in range((dt.date.today() - since).days + 1)]
-    data = aw_app_time(base, days)
-    minutes = 0
-    for app_l, gid in rules.items():
-        src = "aw:" + app_l
-        db.execute("DELETE FROM play_log WHERE source=? AND day>=?", (src, since.isoformat()))
-        for day, apps in data.items():
-            sec = apps.get(app_l, (None, 0))[1]
-            if sec >= 60:
-                db.execute("INSERT INTO play_log (game_id, day, minutes, source) VALUES (?,?,?,?)",
-                           (gid, day, int(sec // 60), src))
-                minutes += int(sec // 60)
-        tot = db.execute("SELECT COALESCE(SUM(minutes),0), MAX(day), MIN(day) FROM play_log WHERE source=?", (src,)).fetchone()
-        ex = db.execute("SELECT id FROM sources WHERE source=? AND ext_id=?", (src, app_l)).fetchone()
-        if ex:
-            db.execute("UPDATE sources SET game_id=?, minutes=?, last_played=?, first_played=? WHERE id=?",
-                       (gid, tot[0], tot[1] or "", tot[2] or "", ex[0]))
-        else:
-            db.execute("""INSERT INTO sources (game_id, source, ext_id, name, platform, minutes, first_played, last_played)
-                          VALUES (?,?,?,?,?,?,?,?)""", (gid, src, app_l, app_l, "PC", tot[0], tot[2] or "", tot[1] or ""))
-            add_platform(db, gid, "PC")
-        if tot[1] and tot[1] >= (dt.date.today() - dt.timedelta(days=14)).isoformat():
-            mark_playing(db, gid, tot[2])
-    set_setting(db, "aw_synced_until", today())
-    db.commit()
-    return {"apps": len(rules), "minutes": minutes}
-
-
 # ---------------------------------------------------------------- RAWG (search, Metascores, genres)
 
 def rawg_search(key, q, n=12):
@@ -800,14 +724,6 @@ def run_sync():
             except Exception as e:
                 result["ok"] = False
                 msgs.append(f"Xbox failed: {e}")
-        if setting(db, "aw_url"):
-            try:
-                s = aw_sync(db)
-                if s:
-                    msgs.append(f"ActivityWatch: {s['apps']} apps tracked")
-            except Exception as e:
-                result["ok"] = False
-                msgs.append(f"ActivityWatch failed: {e}")
         if not msgs:
             msgs.append("No accounts connected")
         if not setting(db, "tracking_since"):
@@ -1002,7 +918,6 @@ def state():
         password_from_env=bool(APP_PASSWORD),
         widget_url=f"/api/widget?token={WIDGET_TOKEN}",
         enrich_pending=pending,
-        aw_rules=rows(db, "SELECT r.app, r.game_id, g.title FROM aw_rules r JOIN games g ON g.id=r.game_id ORDER BY r.app"),
         today=today(),
     )
 
@@ -1131,7 +1046,6 @@ def merge_game(gid):
     b = db.execute("SELECT * FROM games WHERE id=?", (into,)).fetchone() or abort(404)
     db.execute("UPDATE sources SET game_id=? WHERE game_id=?", (into, gid))
     db.execute("UPDATE play_log SET game_id=? WHERE game_id=?", (into, gid))
-    db.execute("UPDATE aw_rules SET game_id=? WHERE game_id=?", (into, gid))
     fill = {}
     for k in ("cover", "banner", "rating", "notes", "started", "completed_date", "metascore", "hltb_main",
               "hltb_extra", "hltb_complete", "released", "genres", "rawg_id", "steam_appid"):
@@ -1291,82 +1205,6 @@ def connect_xbox():
     set_setting(db, "xbox_key", key)
     db.commit()
     return jsonify(ok=True, games=len(titles))
-
-
-@app.post("/api/aw")
-def connect_aw():
-    db = get_db()
-    url = ((request.get_json(force=True) or {}).get("url") or "").strip().rstrip("/")
-    if url:
-        if not re.match(r"https?://", url):
-            url = "http://" + url
-        try:
-            n = len(aw_window_buckets(url))
-        except Exception as e:
-            abort(400, f"Couldn't reach ActivityWatch at {url}: {e}")
-        if not n:
-            abort(400, "Connected, but ActivityWatch has no window-tracking data (aw-watcher-window)")
-    set_setting(db, "aw_url", url)
-    set_setting(db, "aw_synced_until", "")
-    db.commit()
-    return jsonify(ok=True, url=url)
-
-
-@app.get("/api/aw/apps")
-def aw_apps():
-    """The apps you've used most over the last 60 days, to pick games from."""
-    db = get_db()
-    base = setting(db, "aw_url")
-    if not base:
-        abort(400, "Connect ActivityWatch first")
-    days = [dt.date.today() - dt.timedelta(days=i) for i in range(59, -1, -1)]
-    try:
-        data = aw_app_time(base, days)
-    except Exception as e:
-        abort(502, f"ActivityWatch: {e}")
-    tot = {}
-    for apps in data.values():
-        for k, (name, sec) in apps.items():
-            n, s = tot.get(k, (name, 0))
-            tot[k] = (n, s + sec)
-    rules = {r["app"]: r for r in rows(db, "SELECT r.app, r.game_id, g.title FROM aw_rules r JOIN games g ON g.id=r.game_id")}
-    out = [{"app": n, "key": k, "minutes": int(s // 60), "game_id": rules.get(k, {}).get("game_id"),
-            "title": rules.get(k, {}).get("title", "")}
-           for k, (n, s) in sorted(tot.items(), key=lambda x: -x[1][1]) if s >= 600][:80]
-    return jsonify(apps=out)
-
-
-@app.post("/api/aw/rules")
-def aw_rule():
-    """Map an app to a game (by title, creating the game if needed), or remove the mapping."""
-    db = get_db()
-    data = request.get_json(force=True) or {}
-    app_l = (data.get("app") or "").strip().lower()
-    title = (data.get("title") or "").strip()
-    if not app_l:
-        abort(400, "app is required")
-    src = "aw:" + app_l
-    db.execute("DELETE FROM play_log WHERE source=?", (src,))
-    db.execute("DELETE FROM sources WHERE source=?", (src,))
-    db.execute("DELETE FROM aw_rules WHERE app=?", (app_l,))
-    gid = None
-    if title:
-        r = db.execute("SELECT id FROM games WHERE norm=?", (norm_title(title),)).fetchone()
-        if r:
-            gid = r[0]
-        else:
-            gid = db.execute("INSERT INTO games (title, norm, platforms, added, updated) VALUES (?,?,?,?,?)",
-                             (title, norm_title(title), "PC", now_iso(), now_iso())).lastrowid
-        db.execute("INSERT INTO aw_rules VALUES (?, ?)", (app_l, gid))
-    set_setting(db, "aw_synced_until", "")  # re-read the year so the new game gets its history
-    db.commit()
-    if gid:
-        try:
-            aw_sync(db)
-        except Exception as e:
-            log.warning("ActivityWatch sync after rule change: %s", e)
-        wake_enricher()
-    return jsonify(ok=True, game_id=gid)
 
 
 @app.post("/api/accounts/rawg")
